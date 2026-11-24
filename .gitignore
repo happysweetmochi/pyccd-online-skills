@@ -1,0 +1,5 @@
+knowledge-secret.json
+secret.json
+*.pem
+.env
+.env.*
