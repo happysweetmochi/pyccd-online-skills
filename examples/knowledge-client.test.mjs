@@ -6,7 +6,8 @@ import test from 'node:test';
 import { fileURLToPath } from 'node:url';
 import {
   EMPTY_BODY_SHA256,
-  PLANNED_PUBLIC_HOST,
+  PUBLIC_BASE,
+  PUBLIC_HOST,
   assertBaseAllowed,
   buildSignedHeaders,
   canonicalKnowledgeEnrollment,
@@ -81,27 +82,42 @@ test('Ed25519 signature is 64 raw bytes and verifies the knowledge string', () =
   assert.equal(Object.hasOwn(headers.headers, 'authorization'), true);
 });
 
-test('the sample refuses the planned public host before opening a socket', () => {
-  assert.throws(() => assertBaseAllowed(`https://${PLANNED_PUBLIC_HOST}/mcp`), /尚未部署/);
-  assert.throws(() => assertBaseAllowed('http://43.164.130.42:18080/mcp'), /尚未部署/);
-  assert.throws(() => assertBaseAllowed('https://example.com'), /回环/);
+test('the sample accepts the live origin and still rejects other hosts', () => {
+  const live = assertBaseAllowed(`${PUBLIC_BASE}/mcp`);
+  assert.equal(live.protocol, 'https:');
+  assert.equal(live.hostname, PUBLIC_HOST);
+  assert.equal(live.port, '');
+  assert.throws(() => assertBaseAllowed(`http://${PUBLIC_HOST}/mcp`), /其他主机/);
+  assert.throws(() => assertBaseAllowed('http://43.164.130.42:18080/mcp'), /其他主机/);
+  assert.throws(() => assertBaseAllowed('https://example.com'), /其他主机/);
   const allowed = assertBaseAllowed('http://127.0.0.1:18080');
   assert.equal(allowed.hostname, '127.0.0.1');
   assert.equal(allowed.port, '18080');
 });
 
-test('published docs keep the not-deployed stop rule and do not carry secrets', () => {
+test('published docs record the live release and do not carry secrets', () => {
   const readme = fs.readFileSync(path.join(root, 'README.md'), 'utf8');
   const guide = fs.readFileSync(path.join(root, 'docs/AGENT-ONBOARDING.md'), 'utf8');
   const example = fs.readFileSync(path.join(root, 'examples/knowledge-client.mjs'), 'utf8');
-  for (const text of [readme, guide]) {
-    assert.match(text, /尚未部署/);
-    assert.match(text, /1\.1\.7/);
-    assert.match(text, /https:\/\/qianfan\.43-164-130-42\.sslip\.io/);
-    assert.equal(text.includes('独立端点已经可用'), false);
+  for (const text of [readme, guide, example]) {
+    assert.equal(text.includes('尚未部署'), false);
+    assert.equal(text.includes('当前是 1.1.7'), false);
+    assert.equal(text.includes('当前是 **1.1.7**'), false);
+    assert.equal(text.includes('不要向该公网主机发送'), false);
+    assert.equal(text.includes('不要向上述公网主机发送'), false);
     assert.equal(text.includes('自动回退'), false);
     assert.equal(text.includes('自动改用用量池'), false);
   }
+  for (const text of [readme, guide]) {
+    assert.match(text, /2026-11-23 23:03:24 PST/);
+    assert.match(text, /3f0a3588fdfaa26b8fbb5335443f5cea10fc59d3/);
+    assert.match(text, /https:\/\/qianfan\.43-164-130-42\.sslip\.io/);
+    assert.match(text, /wrong_key_purpose/);
+    assert.match(text, /模板示例/);
+    assert.match(text, /还没有同步/);
+  }
+  assert.match(guide, /public_base_status/);
+  assert.match(guide, /online/);
   for (const needle of [
     'QF-ENROLL-KS-V1',
     'knowledge',

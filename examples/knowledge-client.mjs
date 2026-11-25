@@ -1,14 +1,18 @@
 #!/usr/bin/env node
-// Loopback-only sample of the 1.1.8 knowledge client.
-// It does not call the planned public host, does not write secrets, and
-// does not print the API key or the Ed25519 private key.
+// 1.1.8 knowledge client sample.
+// It accepts the live public origin or an explicit loopback port.
+// It does not print the API key or the Ed25519 private key.
 
+import fs from 'node:fs';
 import http from 'node:http';
+import https from 'node:https';
+import path from 'node:path';
 import { createHash, generateKeyPairSync, randomBytes, sign } from 'node:crypto';
 import { pathToFileURL } from 'node:url';
 
 export const EMPTY_BODY_SHA256 = 'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855';
-export const PLANNED_PUBLIC_HOST = 'qianfan.43-164-130-42.sslip.io';
+export const PUBLIC_HOST = 'qianfan.43-164-130-42.sslip.io';
+export const PUBLIC_BASE = `https://${PUBLIC_HOST}`;
 const LOOPBACK = new Set(['127.0.0.1', 'localhost', '::1']);
 
 export function sha256Hex(buffer) {
@@ -33,13 +37,12 @@ export function assertBaseAllowed(base) {
   if (url.protocol !== 'http:' && url.protocol !== 'https:') {
     throw new Error('base 协议不允许。停止。');
   }
-  if (url.hostname === PLANNED_PUBLIC_HOST || url.hostname === '43.164.130.42') {
-    throw new Error('计划中的公网源站尚未部署 1.1.8 知识端点。停止，不要改领用量池钥匙。');
+  const loopback = LOOPBACK.has(url.hostname);
+  const publicOrigin = url.hostname === PUBLIC_HOST && url.protocol === 'https:' && (url.port === '' || url.port === '443');
+  if (!loopback && !publicOrigin) {
+    throw new Error('示例只连接 https://qianfan.43-164-130-42.sslip.io 或带端口的本机回环。其他主机停止，不要改领用量池钥匙。');
   }
-  if (!LOOPBACK.has(url.hostname)) {
-    throw new Error('示例只连接本机回环。公网知识端点尚未部署。停止，不要改领用量池钥匙。');
-  }
-  if (!url.port) throw new Error('示例要求回环 URL 带显式端口。停止。');
+  if (loopback && !url.port) throw new Error('回环 URL 要带显式端口。停止。');
   return url;
 }
 
@@ -94,12 +97,21 @@ function stop(message) {
   return error;
 }
 
+function transport(baseUrl) {
+  return baseUrl.protocol === 'https:' ? https : http;
+}
+
+function requestPort(baseUrl) {
+  if (baseUrl.port) return baseUrl.port;
+  return baseUrl.protocol === 'https:' ? 443 : 80;
+}
+
 function rawRequest(baseUrl, method, target, headers, body) {
   const payload = Buffer.isBuffer(body) ? body : Buffer.from(body || '');
   return new Promise((resolve, reject) => {
-    const req = http.request({
+    const req = transport(baseUrl).request({
       hostname: baseUrl.hostname,
-      port: baseUrl.port,
+      port: requestPort(baseUrl),
       method,
       path: target,
       headers,
@@ -115,7 +127,7 @@ function rawRequest(baseUrl, method, target, headers, body) {
         resolve({ status: res.statusCode, headers: res.headers, raw, json });
       });
     });
-    req.setTimeout(10000, () => req.destroy(stop('本地知识请求超时。停止。')));
+    req.setTimeout(10000, () => req.destroy(stop('知识请求超时。停止。')));
     req.on('error', reject);
     req.end(payload);
   });
@@ -123,9 +135,9 @@ function rawRequest(baseUrl, method, target, headers, body) {
 
 function readStreamStart(baseUrl, target, headers) {
   return new Promise((resolve, reject) => {
-    const req = http.request({
+    const req = transport(baseUrl).request({
       hostname: baseUrl.hostname,
-      port: baseUrl.port,
+      port: requestPort(baseUrl),
       method: 'GET',
       path: target,
       headers,
@@ -151,8 +163,24 @@ function rejectPurpose(response, what) {
   }
 }
 
-export async function runKnowledgeDemo({ base, name, expectPhrase, section }) {
+function writeKnowledgeSecret(home, value) {
+  const dir = path.resolve(home);
+  fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+  fs.chmodSync(dir, 0o700);
+  const file = path.join(dir, 'knowledge-secret.json');
+  const tmp = path.join(dir, `.knowledge-secret.${process.pid}.tmp`);
+  fs.writeFileSync(tmp, `${JSON.stringify(value)}\n`, { mode: 0o600 });
+  fs.chmodSync(tmp, 0o600);
+  fs.renameSync(tmp, file);
+  fs.chmodSync(file, 0o600);
+}
+
+export async function runKnowledgeDemo({ base, name, expectPhrase, section, home }) {
   const baseUrl = assertBaseAllowed(base);
+  const publicOrigin = baseUrl.hostname === PUBLIC_HOST;
+  if (publicOrigin && typeof home !== 'string') {
+    throw stop('公网知识钥匙只返回一次。传入 home 后示例才注册，并以 0600 保存，不打印钥匙。停止。');
+  }
   const identity = generateIdentity();
   const challengeBody = Buffer.from(JSON.stringify({
     name,
@@ -194,6 +222,16 @@ export async function runKnowledgeDemo({ base, name, expectPhrase, section }) {
   }
   if (registered.json.purpose !== 'knowledge' || registered.json.model_access !== false || registered.json.api_key_delivery !== 'once' || registered.json.billing !== 'none') {
     throw stop('注册响应与知识钥匙合同不一致。停止。');
+  }
+  if (typeof home === 'string') {
+    writeKnowledgeSecret(home, {
+      purpose: 'knowledge',
+      storage: 'software',
+      private_key_jwk: identity.privateKey.export({ format: 'jwk' }),
+      public_key: identity.publicKeyB64,
+      api_key: apiKey,
+      key_id: keyId,
+    });
   }
   const sessionIdentity = { privateKey: identity.privateKey, apiKey, keyId };
 
@@ -326,9 +364,10 @@ export async function runKnowledgeDemo({ base, name, expectPhrase, section }) {
 
   return {
     base_host: baseUrl.hostname,
-    deployment: 'sample_loopback_only',
+    deployment: publicOrigin ? 'public_1.1.8' : 'loopback',
     knowledge_release: '1.1.8',
-    public_endpoint_used: false,
+    public_endpoint_used: publicOrigin,
+    secret_persisted: typeof home === 'string',
     api_key_logged: false,
     api_key_prefix_ok: true,
     key_id_prefix_ok: true,
@@ -381,7 +420,7 @@ function parseArgs(argv) {
 async function main() {
   const args = parseArgs(process.argv.slice(2));
   if (!args.base || !args.name) {
-    process.stderr.write('用法: node examples/knowledge-client.mjs --base http://127.0.0.1:<端口> --name <显示名> [--expect <词> --section <章节id>]\n示例拒绝计划中的公网源站。\n');
+    process.stderr.write('用法: node examples/knowledge-client.mjs --base <http://127.0.0.1:端口|https://qianfan.43-164-130-42.sslip.io> --name <显示名> [--home <目录> --expect <词> --section <章节id>]\n公网源站必须带 --home。钥匙和私钥不打印。端点不符时停止，不要改领用量池钥匙。\n');
     process.exit(2);
   }
   const report = await runKnowledgeDemo({
@@ -389,6 +428,7 @@ async function main() {
     name: args.name,
     expectPhrase: args.expect,
     section: args.section,
+    home: typeof args.home === 'string' ? args.home : undefined,
   });
   process.stdout.write(`${JSON.stringify(report, null, 2)}\n`);
 }

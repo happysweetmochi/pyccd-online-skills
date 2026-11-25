@@ -1,20 +1,18 @@
 # 外部 Agent 接入指南
 
-本文给外部 Agent 自己完成知识库接入。它核对的是网关源码包 **1.1.8** 的注册、签名和只读 MCP 合同。它不是部署记录。
+本文给外部 Agent 自己完成知识库接入。合同来自网关 **1.1.8**：独立知识注册、`QF-ENROLL-KS-V1`、每次请求 `QF-SIG-KS-V1`、只读 HTTP 和远程 MCP。
 
-## 部署状态：先停
+## 部署状态
 
-**1.1.8 独立知识认证尚未部署。** 生产源站 `https://qianfan.43-164-130-42.sslip.io` 当前是 **1.1.7**。
+**1.1.8 已于 2026-11-23 23:03:24 PST 上线。** 网关提交 `3f0a3588fdfaa26b8fbb5335443f5cea10fc59d3`。源站是 `https://qianfan.43-164-130-42.sslip.io`。
 
-在这份警告还在时：
+发布核验确认这些路径当时可用：`POST /v1/knowledge/enrollment/challenges`、`POST /v1/knowledge/enrollment/register`、`GET /skills`、`GET /skills/search`、`GET /skills/{skill_id}`，以及远程 `/mcp` 的 `skill_list`、`skill_search`、`skill_read`、GET 和 DELETE。注册规范串是 `QF-ENROLL-KS-V1`（第二行固定 `knowledge`），之后每次请求是 `QF-SIG-KS-V1`。用量池钥匙和知识钥匙互相返回 403 `wrong_key_purpose`。原有用量池的模型路径仍按原来的合同工作。
 
-- 不要向该公网主机发送 `POST /v1/knowledge/enrollment/challenges`、`POST /v1/knowledge/enrollment/register`、`GET /skills*` 或 `/mcp`。
-- 不要把这些路径说成当前可用。
-- 不要在 404、401、403 之后改领用量池钥匙，也不要回退到 `sk-` 或 `QF-SIG-V1`。
-- 不要找运营人员手工要一把共用钥匙。知识钥匙由客户端自己向知识注册路径领取，而且不需要先领取用量池钥匙。
-- `GET /healthz` 即使返回 200，也不证明知识路径存在。1.1.8 的 `/healthz` 不返回包版本号。未知路径返回 404 `not_found`。知识挑战返回 404 时，视为这版还没上线，停止。
+2026-11-25 00:50:13 GMT，对源站的匿名只读 `GET /healthz` 返回 HTTP 200。正文里 `public_base_status` 是 `online`，`online_claim` 是 `operator_configured`，`planned_public_base` 是上述源站，`node` 是 `22.23.1`。该响应没有包版本号。`/healthz` 为 online 只说明运营把公网入口标成在线，不能单独代替知识路径的合同。知识挑战或 MCP `initialize` 若返回 404，或 `serverInfo.version` 不是 `1.1.8`，停止，不要改领用量池钥匙。
 
-部署公告改写本文之前，只允许把下文示例对到**本机回环**上的 1.1.8 进程。示例程序会拒绝计划中的公网主机。
+接入时直接向该源站领取自己的知识钥匙。不需要先领用量池钥匙，也不需要找人手工发一把共用钥匙。
+
+生产上的技能快照目前仍是模板示例。这个 Git 仓库的业务内容还没有同步到生产。不要把本仓库里的说明当成已经出现在 `/skills` 里的业务技能。技能正文仍然只通过 Git 协作变更，知识 HTTP 和 MCP 不能写入。
 
 ## 接入时拿到什么
 
@@ -41,7 +39,7 @@
 
 遇到下面任一情况，结束这一次接入。不要自动重试成用量池注册，不要丢掉签名只填 URL 和钥匙，不要把密钥写进代码、Git 或日志。
 
-1. **版本未上线。** 本文警告仍在，或知识挑战/注册/技能/MCP 返回 404 `not_found`。
+1. **端点与本文不符。** 知识挑战、注册、技能或 MCP 返回 404 `not_found`，或下文的字段、规范串、`serverInfo.version` 对不上。`/healthz` 仍显示 `online` 时也一样停止。
 2. **401。** 包括 `unauthorized`、`invalid_signature`、`key_mismatch`、`key_revoked`、`signature_stale`、`signature_replay`。不要重放同一个 nonce，不要改用 `sk-`。
 3. **403 `wrong_key_purpose`。** 两套钥匙互相拒绝。停止，不要更换用途。
 4. **403 `mcp_session_identity_mismatch` 或 `mcp_session_purpose_mismatch`。** 会话只属于创建它的那把知识钥匙。不要把会话交给另一把钥匙。
@@ -57,7 +55,7 @@
 
 ## 密钥放在哪里
 
-客户端本地生成 Ed25519 密钥对。私钥只留在进程内存或调用方自己的 0600 文件里。本文示例不写文件、不打印私钥、不打印 `skk-` 钥匙。
+客户端本地生成 Ed25519 密钥对。私钥只留在进程内存或调用方自己的 0600 文件里。示例不把私钥或 `skk-` 钥匙打到标准输出、测试日志或 Git。对公网源站注册时必须传入 `--home`，示例只把它们写入该目录的 `knowledge-secret.json`（权限 0600）。
 
 - 公钥是 JWK 字段 `x`：32 字节原始公钥的 base64url，正好 43 个字符，字符集 `[A-Za-z0-9_-]`，没有 `=` 填充。解码后再编码必须与原字符串相同。
 - 注册签名和请求签名都是 Ed25519（RFC 8032）对下文 UTF-8 规范串的签名。Node 的对应调用是 `sign(null, utf8Bytes, privateKey)`。结果是 64 字节，再用无填充 base64url。填充或长度不对会被拒绝。
@@ -355,18 +353,24 @@ POST `/mcp`。这是通知，**没有** `id`。带上会话头和协议头，Acc
 
 ## 示例
 
-可执行样本在仓库的 `examples/knowledge-client.mjs`。它实现了上面的规范串、注册、知识 HTTP、initialize、initialized、tools/list、三个工具、GET 和 DELETE。它只接受 `127.0.0.1`、`localhost` 或 `::1`，并且拒绝 `qianfan.43-164-130-42.sslip.io`。它不打印 `api_key` 或私钥。
+可执行样本在仓库的 `examples/knowledge-client.mjs`。它实现了上面的规范串、注册、知识 HTTP、initialize、initialized、tools/list、三个工具、GET 和 DELETE。它接受已上线的 `https://qianfan.43-164-130-42.sslip.io`，也接受带显式端口的本机回环。其他主机会被拒绝。它不打印 `api_key` 或私钥。
+
+本机：
 
 ```bash
 node examples/knowledge-client.mjs --base http://127.0.0.1:<端口> --name <显示名>
 ```
 
-本地库里有正文时，可以加上 `--expect <词> --section <章节id>`，样本会检查词法检索和按 revision 的读取。无参数的契约测试是：
+公网源站会真正领取一把只返回一次的钥匙，所以必须给出仓库外的目录：
+
+```bash
+node examples/knowledge-client.mjs --base https://qianfan.43-164-130-42.sslip.io --name <显示名> --home <仓库外目录>
+```
+
+本地库里有正文时，可以加上 `--expect <词> --section <章节id>`，样本会检查词法检索和按 revision 的读取。契约测试不启动网关，也不访问公网：
 
 ```bash
 node --test examples/knowledge-client.test.mjs
 ```
 
-该测试不启动网关，也不访问公网。
-
-把样本指到生产源站会直接停止。公网要等本文的部署警告被明确改掉之后，再用同一套签名重新实现；那之前不要去掉回环限制去试生产。
+样本若看到 404、401、403 `wrong_key_purpose`，或 `serverInfo.version` 不是 `1.1.8`，会停止，不会改去领取用量池钥匙。
